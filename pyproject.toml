@@ -7,3 +7,12 @@ requires-python = ">=3.13"
 dependencies = [
     "pydantic>=2.13.4",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
