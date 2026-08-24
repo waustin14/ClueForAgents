@@ -8,6 +8,16 @@ dependencies = [
     "pydantic>=2.13.4",
 ]
 
+[project.optional-dependencies]
+langchain = [
+    "langchain-core>=0.3",
+    "langchain-anthropic>=0.3",
+    "langchain-openai>=0.3",
+    "langchain-google-genai>=2.0",
+    "langchain-ollama>=0.3",
+    "langchain-cerebras>=0.5",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",
