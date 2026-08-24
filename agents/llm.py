@@ -1,12 +1,29 @@
+from dataclasses import dataclass
 from typing import Protocol
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from agents.base import ClueAgent
 from models.actions import MakeAccusation, MakeSuggestion, PassTurn, PlayerAction
 from models.observation import PlayerObservation
 
-_ACTION_TYPES: tuple[type[PlayerAction], ...] = (MakeAccusation, MakeSuggestion, PassTurn)
+_player_action_adapter: TypeAdapter[PlayerAction] = TypeAdapter(PlayerAction)
+
+
+@dataclass
+class PromptSegment:
+    """One piece of a prompt, tagged with whether its bytes are stable.
+
+    `cacheable=True` segments are only ever appended to or left untouched
+    turn-over-turn for a given agent, so a client backed by a provider with
+    prefix caching (e.g. Anthropic's `cache_control`) can mark the boundary
+    after the last cacheable segment and pay full price only for what
+    changed. A client for a provider without explicit caching can simply
+    ignore the flag and concatenate everything.
+    """
+
+    text: str
+    cacheable: bool = False
 
 
 class LLMClient(Protocol):
@@ -17,35 +34,60 @@ class LLMClient(Protocol):
     depends on a specific SDK.
     """
 
-    async def complete(self, prompt: str) -> str: ...
+    async def complete(self, segments: list[PromptSegment]) -> str: ...
 
 
-def build_prompt(observation: PlayerObservation, scratchpad: str = "") -> str:
-    lines = [
-        "You are playing Clue. Respond with a single JSON object matching one of:",
-        f"  {MakeSuggestion.__name__}: {{'person', 'weapon', 'room'}}",
-        f"  {MakeAccusation.__name__}: {{'person', 'weapon', 'room'}}",
-        f"  {PassTurn.__name__}: {{}}",
-        "",
-        f"You are player {observation.player_id}. Current player: {observation.current_player_id}.",
+def build_prompt(observation: PlayerObservation, scratchpad: str = "") -> list[PromptSegment]:
+    """Builds the prompt as stable-prefix-first, volatile-suffix-last.
+
+    `player_id` and `own_cards` never change after deal; `public_history`
+    and `private_reveals` only ever grow by appending. Those are cacheable.
+    `card_log` mutates in place as facts are learned, and `current_player_id`
+    /`turn_number`/`active`/`scratchpad` change every turn, so those go in
+    the trailing, non-cacheable segment.
+    """
+    instructions = "\n".join(
+        [
+            "You are playing Clue. Respond with a single JSON object matching one of:",
+            f"  {{'kind': 'suggestion', 'person', 'weapon', 'room'}}  ({MakeSuggestion.__name__})",
+            f"  {{'kind': 'accusation', 'person', 'weapon', 'room'}}  ({MakeAccusation.__name__})",
+            f"  {{'kind': 'pass'}}  ({PassTurn.__name__})",
+            "The 'kind' field is required and selects which of the three you mean.",
+            "",
+            f"You are player {observation.player_id}.",
+        ]
+    )
+    own_hand = f"Your hand: {[card.value.value for card in observation.own_cards]}"
+    public_history = "Public event history:\n" + "\n".join(
+        event.model_dump_json() for event in observation.public_history
+    )
+    private_reveals = "Private reveals you've seen:\n" + "\n".join(
+        event.model_dump_json() for event in observation.private_reveals
+    )
+
+    volatile_lines = [
+        f"Current player: {observation.current_player_id}.",
         f"Turn: {observation.turn_number}. You are still active: {observation.active}.",
-        f"Your hand: {[card.value.value for card in observation.own_cards]}",
         f"Your card knowledge log: {observation.card_log.model_dump_json()}",
-        f"Public event history: {[e.model_dump_json() for e in observation.public_history]}",
-        f"Private reveals you've seen: {[e.model_dump_json() for e in observation.private_reveals]}",
     ]
     if scratchpad:
-        lines.append(f"Your private notes from previous turns: {scratchpad}")
-    return "\n".join(lines)
+        volatile_lines.append(f"Your private notes from previous turns: {scratchpad}")
+    volatile = "\n".join(volatile_lines)
+
+    return [
+        PromptSegment(instructions, cacheable=True),
+        PromptSegment(own_hand, cacheable=True),
+        PromptSegment(public_history, cacheable=True),
+        PromptSegment(private_reveals, cacheable=True),
+        PromptSegment(volatile, cacheable=False),
+    ]
 
 
 def parse_action(raw: str) -> PlayerAction:
-    for action_cls in _ACTION_TYPES:
-        try:
-            return action_cls.model_validate_json(raw)
-        except ValidationError:
-            continue
-    raise ValueError(f"Could not parse a valid action from LLM output: {raw!r}")
+    try:
+        return _player_action_adapter.validate_json(raw)
+    except ValidationError as exc:
+        raise ValueError(f"Could not parse a valid action from LLM output: {raw!r}") from exc
 
 
 class LLMClueAgent(ClueAgent):
@@ -62,6 +104,6 @@ class LLMClueAgent(ClueAgent):
         self.scratchpad = ""
 
     async def choose_action(self, observation: PlayerObservation) -> PlayerAction:
-        prompt = build_prompt(observation, self.scratchpad)
-        raw = await self.client.complete(prompt)
+        segments = build_prompt(observation, self.scratchpad)
+        raw = await self.client.complete(segments)
         return parse_action(raw)

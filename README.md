@@ -24,6 +24,21 @@ Agents only ever see a `PlayerObservation`, derived by the engine, which
 contains their own hand, their card-knowledge log, and the public/private
 event history they're entitled to.
 
+### Prompt structure and caching
+
+`agents/llm.py::build_prompt` returns an ordered list of `PromptSegment`s
+rather than one flat string, split stable-first / volatile-last: the game
+instructions, the agent's hand, and the public/private event histories only
+ever grow by appending, so they're marked `cacheable=True`; per-turn state
+(`current_player_id`, `turn_number`, the card log, the scratchpad) changes
+every call and is marked `cacheable=False`. Rebuilding the whole prompt from
+scratch each turn is otherwise the expensive choice — without this
+ordering, every turn re-pays full price for the entire history instead of
+only the new bytes. A `LLMClient` backed by a provider with explicit prompt
+caching (e.g. Anthropic's `cache_control`) can place its cache boundary
+right after the last cacheable segment; a client for a provider with only
+automatic caching can ignore the flag and concatenate everything.
+
 ## Running
 
 ```bash
