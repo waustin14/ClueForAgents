@@ -11,6 +11,7 @@ from agents.langchain_client import (  # noqa: E402
     anthropic_client,
     build_messages,
     cerebras_client,
+    create_llm_client,
     gemini_client,
     ollama_client,
     openai_client,
@@ -63,6 +64,42 @@ def test_non_anthropic_providers_get_plain_concatenated_system_text(monkeypatch,
 
     assert messages[0].content == "INSTRUCTIONS\n\nHAND\n\nHISTORY"
     assert messages[1].content == "VOLATILE turn info"
+
+
+@pytest.mark.parametrize(
+    "provider, model, env",
+    [
+        ("anthropic", "claude-sonnet-5", {"ANTHROPIC_API_KEY": "test-key"}),
+        ("openai", "gpt-4o-mini", {"OPENAI_API_KEY": "test-key"}),
+        ("gemini", "gemini-2.5-flash", {"GOOGLE_API_KEY": "test-key"}),
+        ("ollama", "llama3", {}),
+        ("cerebras", "llama-3.3-70b", {"CEREBRAS_API_KEY": "test-key"}),
+    ],
+)
+def test_create_llm_client_dispatches_to_every_provider(monkeypatch, provider, model, env):
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    client = create_llm_client(provider, model)
+
+    assert isinstance(client, LangChainLLMClient)
+
+
+def test_create_llm_client_rejects_unknown_provider():
+    with pytest.raises(ValueError, match="Unknown provider"):
+        create_llm_client("watsonx", "some-model")
+
+
+def test_ollama_client_defaults_keep_alive_to_avoid_evicting_the_kv_cache():
+    client = ollama_client("llama3")
+
+    assert client.model.keep_alive == "30m"
+
+
+def test_ollama_client_keep_alive_override_is_respected():
+    client = ollama_client("llama3", keep_alive="2h")
+
+    assert client.model.keep_alive == "2h"
 
 
 class FakeChatModel:

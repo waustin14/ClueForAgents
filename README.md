@@ -42,19 +42,27 @@ automatic caching can ignore the flag and concatenate everything.
 ### LangChain-backed LLM clients
 
 `agents/langchain_client.py` implements `LLMClient` on top of any LangChain
-`BaseChatModel`, with factories for five providers:
+`BaseChatModel`, for five providers, all reachable through one factory:
 
 ```python
-from agents.langchain_client import (
-    anthropic_client, openai_client, gemini_client, ollama_client, cerebras_client,
-)
+from agents.langchain_client import create_llm_client
 
-client = anthropic_client("claude-sonnet-5")   # or openai_client("gpt-4o-mini"), etc.
+client = create_llm_client("anthropic", "claude-sonnet-5")
+# or: create_llm_client("openai", "gpt-4o-mini")
+#     create_llm_client("gemini", "gemini-2.5-flash")
+#     create_llm_client("ollama", "llama3")
+#     create_llm_client("cerebras", "llama-3.3-70b")
 agent = LLMClueAgent(player_id=0, client=client)
 ```
 
-`PromptSegment.cacheable` is honored per provider, because caching itself
-isn't uniform:
+`create_llm_client(provider, model, **kwargs)` is the one entry point to
+reach for when the provider itself is a variable in an experiment (sweeping
+providers/models from a config or CLI flag); each provider's own factory
+(`anthropic_client`, `openai_client`, `gemini_client`, `ollama_client`,
+`cerebras_client`) is still exported directly for when it isn't.
+
+`PromptSegment.cacheable` (stable-first, volatile-last — see above) is what
+makes caching work everywhere, but only one provider needs code to use it:
 
 - **Anthropic** — explicit opt-in. Cacheable segments become separate
   content blocks in the system message, `cache_control` on the last one.
@@ -64,8 +72,15 @@ isn't uniform:
   stored `CachedContent` resource referenced by ID, not an inline
   per-message flag, so this adapter doesn't attempt to bridge it; segments
   are concatenated like OpenAI.
-- **Ollama / Cerebras** — no documented prompt-prefix caching to opt into;
-  segments are concatenated.
+- **Cerebras** — automatic and implicit: the platform hashes each request
+  in 128-token blocks and reuses any block matching a recent request, no
+  opt-in needed. Segments are concatenated; `PromptSegment` ordering is
+  what makes the prefix actually match.
+- **Ollama** — also automatic and implicit, via the underlying llama.cpp
+  engine's KV-cache reuse for a byte-identical prefix — same principle,
+  but only while the model stays loaded. Ollama unloads after 5 minutes
+  idle by default, which would silently evict the cache mid-game, so
+  `ollama_client` defaults `keep_alive="30m"` (override via kwargs).
 
 Requires the optional dependency group: `uv sync --extra langchain`. Without
 it, `agents/langchain_client.py` isn't imported by anything else, and its

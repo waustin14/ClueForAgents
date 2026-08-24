@@ -1,9 +1,10 @@
 """An LLMClient backed by any LangChain BaseChatModel.
 
 One adapter, five providers (Anthropic, OpenAI, Gemini, Ollama, Cerebras),
-selected by which factory function you call. `PromptSegment.cacheable`
-(see agents/llm.py) is honored per-provider, not uniformly, because prompt
-caching itself isn't uniform across providers:
+selected via `create_llm_client(provider, model, **kwargs)` or by calling a
+provider's factory function directly. `PromptSegment.cacheable` (see
+agents/llm.py) only matters to one of the five, because caching itself
+isn't uniform:
 
 - Anthropic: explicit opt-in. Cacheable segments become separate content
   blocks in the system message, with `cache_control` attached to the last
@@ -15,8 +16,16 @@ caching itself isn't uniform across providers:
   stored `CachedContent` resource referenced by ID, not an inline
   per-message flag — a fundamentally different shape this adapter does not
   attempt to bridge. Segments are concatenated like OpenAI.
-- Ollama / Cerebras: no documented prompt-prefix caching to opt into.
-  Segments are concatenated.
+- Cerebras: automatic and implicit — the platform hashes each request in
+  128-token blocks and reuses any block matching a recent request, no
+  opt-in required. Segments are concatenated; putting the stable content
+  first (which PromptSegment already does) is what makes the prefix match.
+- Ollama: also automatic and implicit, via the underlying llama.cpp
+  engine's KV-cache reuse for requests sharing an exact byte-identical
+  prefix — same principle, but it only holds while the model stays loaded
+  in memory. Ollama's default is to unload after 5 minutes of idling,
+  which would silently evict the cache mid-game, so `ollama_client`
+  defaults `keep_alive` to a longer duration (override via kwargs).
 
 Requires the optional `langchain` dependency group:
 `uv sync --extra langchain`.
@@ -110,6 +119,7 @@ def gemini_client(model: str, **kwargs: Any) -> LangChainLLMClient:
 def ollama_client(model: str, **kwargs: Any) -> LangChainLLMClient:
     from langchain_ollama import ChatOllama
 
+    kwargs.setdefault("keep_alive", "30m")
     return LangChainLLMClient(ChatOllama(model=model, **kwargs))
 
 
@@ -117,3 +127,27 @@ def cerebras_client(model: str, **kwargs: Any) -> LangChainLLMClient:
     from langchain_cerebras import ChatCerebras
 
     return LangChainLLMClient(ChatCerebras(model=model, **kwargs))
+
+
+_PROVIDER_FACTORIES = {
+    "anthropic": anthropic_client,
+    "openai": openai_client,
+    "gemini": gemini_client,
+    "ollama": ollama_client,
+    "cerebras": cerebras_client,
+}
+
+
+def create_llm_client(provider: str, model: str, **kwargs: Any) -> LangChainLLMClient:
+    """Single entry point for all five providers: create_llm_client("anthropic", "claude-sonnet-5").
+
+    Prefer this over calling a provider's factory directly when the
+    provider itself is a variable in your experiment (e.g. sweeping
+    providers/models from a config file or CLI flag).
+    """
+    try:
+        factory = _PROVIDER_FACTORIES[provider]
+    except KeyError:
+        available = ", ".join(sorted(_PROVIDER_FACTORIES))
+        raise ValueError(f"Unknown provider {provider!r}. Available: {available}") from None
+    return factory(model, **kwargs)
