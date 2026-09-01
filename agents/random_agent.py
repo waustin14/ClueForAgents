@@ -16,7 +16,7 @@ class RandomClueAgent(ClueAgent):
     and transport layers can be exercised end-to-end without an LLM.
     """
 
-    async def choose_action(self, observation: PlayerObservation) -> PlayerAction:
+    async def _choose_action(self, observation: PlayerObservation) -> PlayerAction:
         if observation.current_player_id != self.player_id or not observation.active:
             return PassTurn()
 

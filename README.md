@@ -87,11 +87,53 @@ it, `agents/langchain_client.py` isn't imported by anything else, and its
 test file skips itself via `pytest.importorskip` — the core game and its
 tests never need LangChain or network access.
 
+### Tracing (OpenTelemetry)
+
+`telemetry.py` exposes a single module-level `tracer`, imported and used
+directly by `game/engine.py` and `agents/base.py` — nothing conditional,
+no feature flag to thread through call sites. That's safe because
+`opentelemetry-api` (a core dependency) ships a no-op tracer by default:
+every `tracer.start_as_current_span(...)` call is inert until
+`configure_tracing()` actually installs an exporting `TracerProvider`.
+
+Spans, one turn of a 3-player game:
+
+```
+clue.game            (main.py, root span for the whole run)
+└── clue.turn        (GameEngine.take_turn — player_id, turn_number, action_type)
+    └── clue.suggestion   (or clue.accusation — disproving_player_id, correct, etc.)
+clue.agent.choose_action   (agents/base.py — every ClueAgent subclass, for free;
+                             wraps LLMClueAgent's LLM round-trip when that's the agent)
+```
+
+Centralizing the agent span in `ClueAgent.choose_action` (subclasses
+implement `_choose_action`) means `RandomClueAgent`, `LLMClueAgent`, and any
+future rule-based/human agent all get consistent per-decision latency and
+outcome attributes without instrumenting themselves individually — exactly
+the kind of cross-cutting concern that shouldn't live in each strategy.
+
+`configure_tracing()` wires up an OTLP exporter, reading the standard
+`OTEL_EXPORTER_OTLP_*` environment variables (defaults to
+`localhost:4317`) rather than inventing a parallel config surface. It's
+called from `main.py` guarded by a bare `try/except ImportError`, so the
+game runs identically whether or not tracing is configured — with no
+collector reachable, spans just fail to export in the background (logged,
+not raised), though process exit is delayed a few seconds by the OTLP gRPC
+exporter's own shutdown-flush retries, which is expected without a
+collector, not a hang.
+
+Requires the optional dependency group: `uv sync --extra otel`
+(`opentelemetry-sdk` + `opentelemetry-exporter-otlp-proto-grpc`). Without
+it, `configure_tracing()` raises `ImportError` and the game behaves exactly
+as if tracing were never mentioned; `tests/test_telemetry.py` skips itself
+via `pytest.importorskip` the same way the LangChain tests do.
+
 ## Running
 
 ```bash
 uv sync                          # core game only
 uv sync --extra langchain        # + LangChain provider clients
+uv sync --extra otel             # + OpenTelemetry OTLP tracing
 uv run python main.py            # plays one local game with random agents
 uv run pytest                    # runs the test suite (no LLM or network required)
 ```

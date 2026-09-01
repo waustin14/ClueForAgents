@@ -103,7 +103,7 @@ class LLMClueAgent(ClueAgent):
         self.client = client
         self.scratchpad = ""
 
-    async def choose_action(self, observation: PlayerObservation) -> PlayerAction:
+    async def _choose_action(self, observation: PlayerObservation) -> PlayerAction:
         segments = build_prompt(observation, self.scratchpad)
         raw = await self.client.complete(segments)
         return parse_action(raw)
