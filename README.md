@@ -128,12 +128,42 @@ it, `configure_tracing()` raises `ImportError` and the game behaves exactly
 as if tracing were never mentioned; `tests/test_telemetry.py` skips itself
 via `pytest.importorskip` the same way the LangChain tests do.
 
+### Tracing (LangSmith)
+
+Every provider in `agents/langchain_client.py` — Anthropic, OpenAI, Gemini,
+Ollama, Cerebras — is a LangChain `BaseChatModel`, so LLM tracing doesn't
+need a per-provider or per-call-site hook the way the OTel spans above do:
+LangChain's global callback manager already wraps every
+`model.ainvoke(...)` call inside `LangChainLLMClient.complete`, and
+LangSmith just needs to be told to listen. `configure_langsmith_tracing()`
+in `telemetry.py` does that — it sets `LANGSMITH_TRACING=true` and a
+default `LANGSMITH_PROJECT`, both only if unset, so an operator's own
+environment always wins. `LANGSMITH_API_KEY` and `LANGSMITH_ENDPOINT` are
+read straight from the environment, same as `configure_tracing()` does for
+`OTEL_EXPORTER_OTLP_*` — no parallel configuration surface.
+
+It's called from `main.py` guarded by a bare `try/except ImportError`,
+same soft-opt-in shape as OTel: without the extra, or without
+`LANGSMITH_API_KEY` set, LangChain just has nowhere to send runs and every
+LLM call proceeds untraced rather than the game breaking. Once enabled,
+each traced run captures the full prompt (including which `PromptSegment`s
+were marked `cacheable`), the completion, token usage, latency, and — for
+Anthropic — cache read/write token counts, viewable per-turn in the
+LangSmith UI grouped under the project name.
+
+Requires the optional dependency group: `uv sync --extra langsmith`
+(`langsmith`) on top of `--extra langchain`, since there's nothing to trace
+without a LangChain-backed client. Without it, `configure_langsmith_tracing()`
+raises `ImportError`; `tests/test_langsmith.py` skips itself via
+`pytest.importorskip` the same way.
+
 ## Running
 
 ```bash
 uv sync                          # core game only
 uv sync --extra langchain        # + LangChain provider clients
 uv sync --extra otel             # + OpenTelemetry OTLP tracing
+uv sync --extra langsmith        # + LangSmith LLM call tracing (needs --extra langchain too)
 uv run python main.py            # plays one local game with random agents
 uv run pytest                    # runs the test suite (no LLM or network required)
 ```

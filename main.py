@@ -4,7 +4,7 @@ from agents.random_agent import RandomClueAgent
 from game.engine import GameEngine
 from game.setup import initialize_game
 from models.game_state import GameStatus
-from telemetry import configure_tracing, tracer
+from telemetry import configure_langsmith_tracing, configure_tracing, tracer
 from transport.local import LocalTransport
 
 
@@ -42,8 +42,22 @@ def _configure_tracing_if_available() -> None:
         pass
 
 
+def _configure_langsmith_tracing_if_available() -> None:
+    """Wires up LangSmith tracing when the optional `langsmith` extra is installed.
+
+    Same soft-opt-in shape as `_configure_tracing_if_available()` above:
+    without the extra, `configure_langsmith_tracing()` raises ImportError
+    and every LangChain-backed LLM call just runs untraced.
+    """
+    try:
+        configure_langsmith_tracing()
+    except ImportError:
+        pass
+
+
 def main() -> None:
     _configure_tracing_if_available()
+    _configure_langsmith_tracing_if_available()
     asyncio.run(run_local_game())
 
 
