@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 
 from models.card import Card
+from models.deductions import PublicDeductions
 from models.events import CardRevealEvent, PublicGameEvent
 from models.player import PlayerLog
 
@@ -14,3 +15,4 @@ class PlayerObservation(BaseModel):
     card_log: PlayerLog
     public_history: list[PublicGameEvent] = Field(default_factory=list)
     private_reveals: list[CardRevealEvent] = Field(default_factory=list)
+    public_deductions: PublicDeductions = Field(default_factory=PublicDeductions)

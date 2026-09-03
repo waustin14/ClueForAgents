@@ -94,6 +94,94 @@ def test_wrong_accusation_eliminates_player_but_game_continues():
     assert state.current_player_id == 1
 
 
+def test_turn_skips_eliminated_player():
+    state = build_state()
+    transport = LocalTransport()
+    engine = GameEngine(state, transport)
+    wrong = MakeAccusation(person=PersonValue.GREEN, weapon=WeaponValue.ROPE, room=RoomValue.STUDY)
+
+    run(engine.take_turn(0, wrong))
+    run(engine.take_turn(1, PassTurn()))
+
+    assert state.current_player_id == 2
+
+    run(engine.take_turn(2, PassTurn()))
+
+    # Player 0 is out, so the wrap skips their seat entirely.
+    assert state.current_player_id == 1
+
+
+def test_game_ends_when_only_one_player_is_left_standing():
+    state = build_state()
+    transport = LocalTransport()
+    engine = GameEngine(state, transport)
+    wrong = MakeAccusation(person=PersonValue.GREEN, weapon=WeaponValue.ROPE, room=RoomValue.STUDY)
+
+    run(engine.take_turn(0, wrong))
+    assert state.status == GameStatus.IN_PROGRESS
+
+    run(engine.take_turn(1, wrong))
+
+    assert state.status == GameStatus.FINISHED
+    assert state.winning_player_id == 2
+    assert transport.broadcast_log[-1].winning_player_id == 2
+
+
+def test_reveal_choice_is_delegated_and_told_who_suggested():
+    state = build_state()
+    # Player 2 now holds two of the three named cards, so which one it shows
+    # is a real choice rather than a formality.
+    state.players[2].cards = [
+        RoomCard(value=RoomValue.STUDY),
+        WeaponCard(value=WeaponValue.ROPE),
+    ]
+    transport = LocalTransport()
+    calls = []
+
+    async def choose_rope(player, suggestion, matches, suggesting_player_id):
+        calls.append((player.id, suggesting_player_id, len(matches)))
+        return next(c for c in matches if c.value == WeaponValue.ROPE)
+
+    engine = GameEngine(state, transport, choose_reveal=choose_rope)
+
+    run(
+        engine.take_turn(
+            0,
+            MakeSuggestion(person=PersonValue.PLUM, weapon=WeaponValue.ROPE, room=RoomValue.STUDY),
+        )
+    )
+
+    assert calls == [(2, 0, 2)]
+    assert state.private_reveal_history[-1].card.value == WeaponValue.ROPE
+    # The suggester learns about the card it was actually shown, not the other.
+    assert state.players[0].log.weapons[WeaponValue.ROPE].who_has == 2
+    assert state.players[0].log.rooms[RoomValue.STUDY].seen is False
+
+
+def test_engine_rejects_a_reveal_that_does_not_disprove():
+    state = build_state()
+    transport = LocalTransport()
+
+    async def cheat(player, suggestion, matches, suggesting_player_id):
+        return PersonCard(value=PersonValue.WHITE)
+
+    engine = GameEngine(state, transport, choose_reveal=cheat)
+
+    try:
+        run(
+            engine.take_turn(
+                0,
+                MakeSuggestion(
+                    person=PersonValue.PLUM, weapon=WeaponValue.ROPE, room=RoomValue.STUDY
+                ),
+            )
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for a reveal that disproves nothing")
+
+
 def test_eliminated_player_cannot_suggest_or_accuse():
     state = build_state()
     state.players[0].active = False

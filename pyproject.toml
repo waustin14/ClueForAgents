@@ -25,6 +25,10 @@ otel = [
 langsmith = [
     "langsmith>=0.1",
 ]
+api = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+]
 
 [dependency-groups]
 dev = [

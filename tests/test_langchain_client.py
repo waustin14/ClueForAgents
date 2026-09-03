@@ -108,9 +108,11 @@ class FakeChatModel:
     def __init__(self, reply: str) -> None:
         self.reply = reply
         self.received_messages = None
+        self.received_config = None
 
-    async def ainvoke(self, messages):
+    async def ainvoke(self, messages, config=None):
         self.received_messages = messages
+        self.received_config = config
         return AIMessage(content=self.reply)
 
 
@@ -131,3 +133,52 @@ def test_complete_flattens_list_of_text_content_blocks():
     result = run(client.complete(SEGMENTS))
 
     assert result == '{"kind": "pass"}'
+
+
+def test_every_call_tells_langsmith_which_seat_and_model_made_it():
+    # Exports before this carried nothing but the project name, so which
+    # model played which seat had to be reconstructed from prompt text.
+    model = FakeChatModel("ok")
+    client = LangChainLLMClient(
+        model, {"clue_run_id": "run-abc", "clue_player_id": 2, "clue_model": "claude-sonnet-5"}
+    )
+
+    run(client.complete([PromptSegment("hi")], {"clue_decision": "action", "clue_turn": 7}))
+
+    config = model.received_config
+    assert config["metadata"] == {
+        "clue_run_id": "run-abc",
+        "clue_player_id": 2,
+        "clue_model": "claude-sonnet-5",
+        "clue_decision": "action",
+        "clue_turn": 7,
+    }
+    # Tags are the cheap filter in the UI; the turn number is deliberately
+    # not one of them, or a run would carry hundreds of tags.
+    assert set(config["tags"]) == {
+        "run_id:run-abc",
+        "player_id:2",
+        "model:claude-sonnet-5",
+        "decision:action",
+    }
+    # Otherwise every row in the LangSmith run list reads "FakeChatModel".
+    assert config["run_name"] == "action p2 t7"
+
+
+def test_a_client_with_nothing_to_say_sends_no_config():
+    model = FakeChatModel("ok")
+
+    run(LangChainLLMClient(model).complete([PromptSegment("hi")]))
+
+    assert model.received_config == {}
+
+
+def test_create_llm_client_records_the_provider_and_model_it_was_asked_for(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    client = create_llm_client("openai", "gpt-5", trace_metadata={"clue_player_id": 3})
+
+    assert client.metadata == {
+        "clue_provider": "openai",
+        "clue_model": "gpt-5",
+        "clue_player_id": 3,
+    }

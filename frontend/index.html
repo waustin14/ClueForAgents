@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Clue for Agents — Operational Test Console</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Clue for Agents</h1>
+    <p class="subtitle">Operational test console — configure seats, run a game, watch it play out.</p>
+  </header>
+
+  <main>
+    <section id="setup-screen">
+      <div class="card">
+        <h2>New game</h2>
+
+        <label class="field">
+          <span>Number of players</span>
+          <input id="n-players" type="number" min="2" max="6" value="3" />
+        </label>
+
+        <label class="field">
+          <span>Max turns (safety cap)</span>
+          <input id="max-turns" type="number" min="1" max="2000" value="500" />
+        </label>
+
+        <div id="seats"></div>
+
+        <button id="start-button" type="button">Start game</button>
+        <p id="setup-error" class="error" hidden></p>
+      </div>
+    </section>
+
+    <section id="game-screen" hidden>
+      <div class="card game-header">
+        <div>
+          <h2>Game <code id="game-id"></code></h2>
+          <p>
+            Status: <span id="game-status">running</span> ·
+            Turn <span id="turn-number">0</span> ·
+            Current player <span id="current-player">–</span>
+          </p>
+        </div>
+        <div class="header-actions">
+          <a id="jaeger-link" href="#" target="_blank" rel="noopener">View trace in Jaeger →</a>
+          <button id="new-game-button" type="button">New game</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Seats</h3>
+        <div id="seat-cards"></div>
+      </div>
+
+      <div class="card">
+        <div class="feed-header">
+          <h3>Event feed</h3>
+          <label class="toggle">
+            <input id="show-reveals" type="checkbox" />
+            Show private reveals (debug)
+          </label>
+        </div>
+        <div id="feed"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

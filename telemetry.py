@@ -59,6 +59,12 @@ def configure_langsmith_tracing(project_name: str = "clueforagents") -> None:
     accepted as parameters here, for the same reason `configure_tracing()`
     doesn't wrap `OTEL_EXPORTER_OTLP_*`: no parallel configuration surface.
 
+    Defaulting `LANGSMITH_TRACING` to "true" only happens when
+    `LANGSMITH_API_KEY` is actually set to a non-empty value — a blank key
+    (e.g. an unfilled placeholder copied from `.env.example`) would otherwise
+    turn tracing on and then fail every upload with a 401, uselessly
+    retrying on every single LLM call.
+
     Requires the optional `langsmith` dependency group (`uv sync --extra
     langsmith`) — raises ImportError if it isn't installed. Callers that
     want tracing to be a soft opt-in should catch that rather than
@@ -66,5 +72,6 @@ def configure_langsmith_tracing(project_name: str = "clueforagents") -> None:
     """
     import langsmith  # noqa: F401  (import only to assert the extra is installed)
 
-    os.environ.setdefault("LANGSMITH_TRACING", "true")
-    os.environ.setdefault("LANGSMITH_PROJECT", project_name)
+    if os.environ.get("LANGSMITH_API_KEY"):
+        os.environ.setdefault("LANGSMITH_TRACING", "true")
+        os.environ.setdefault("LANGSMITH_PROJECT", project_name)

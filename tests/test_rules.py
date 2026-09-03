@@ -1,4 +1,5 @@
 from game.rules import (
+    active_players,
     can_player_disprove,
     cards_that_can_disprove,
     is_correct_accusation,
@@ -53,7 +54,41 @@ def test_next_player_id_wraps_around():
     assert next_player_id(3, players) == 0
 
 
+def test_next_player_id_skips_eliminated_players():
+    players = [make_player(i, []) for i in range(4)]
+    players[1].active = False
+    players[2].active = False
+
+    assert next_player_id(0, players) == 3
+    # And wrapping past the eliminated pair works from the far side too.
+    assert next_player_id(3, players) == 0
+
+
+def test_next_player_id_returns_current_when_nobody_is_active():
+    players = [make_player(i, []) for i in range(3)]
+    for player in players:
+        player.active = False
+
+    assert next_player_id(1, players) == 1
+
+
 def test_turn_order_after_excludes_self_and_wraps():
     players = [make_player(i, []) for i in range(4)]
 
     assert [p.id for p in turn_order_after(1, players)] == [2, 3, 0]
+
+
+def test_turn_order_after_still_includes_eliminated_players():
+    # Being out stops you taking turns, not holding cards: an eliminated
+    # player must still be asked to disprove.
+    players = [make_player(i, []) for i in range(4)]
+    players[2].active = False
+
+    assert [p.id for p in turn_order_after(1, players)] == [2, 3, 0]
+
+
+def test_active_players_filters_out_eliminated():
+    players = [make_player(i, []) for i in range(3)]
+    players[0].active = False
+
+    assert [p.id for p in active_players(players)] == [1, 2]

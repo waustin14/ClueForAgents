@@ -1,0 +1,37 @@
+# Receives OTLP traces from the game-logic container and forwards them to
+# Jaeger. Jaeger's all-in-one image accepts OTLP natively (COLLECTOR_OTLP_ENABLED=true
+# in docker-compose.yml), so this hop mainly exists because the compose stack is
+# asked for as a distinct OTEL-collector container, not because Jaeger needs it —
+# it also gives a place to add batching/processing without touching game-logic.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  # Prints received spans to the collector's own container logs — handy for
+  # confirming traces are arriving at all while validating the stack.
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/jaeger, debug]

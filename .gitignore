@@ -4,4 +4,5 @@ __pycache__/
 .pytest_cache/
 .env
 .claude/
-.tokensave
+.tokensave/
+traces/

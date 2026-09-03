@@ -1,0 +1,56 @@
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # Jaeger UI
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./docker/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    depends_on:
+      # No Docker healthcheck: the contrib image is distroless (no shell/CMD
+      # tooling to probe with) — telemetry.py already treats OTLP export
+      # failures as non-blocking/logged, so game-logic starting before the
+      # collector is ready is a startup race, not a failure.
+      - jaeger
+
+  game-logic:
+    build:
+      context: .
+      dockerfile: docker/game-logic.Dockerfile
+    env_file:
+      - .env
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    ports:
+      - "8000:8000"
+    depends_on:
+      - otel-collector
+    healthcheck:
+      # 127.0.0.1, not localhost: see docker/frontend.Dockerfile.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      game-logic:
+        condition: service_healthy
+    healthcheck:
+      # 127.0.0.1, not localhost: see docker/frontend.Dockerfile.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s

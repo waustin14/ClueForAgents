@@ -1,6 +1,9 @@
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from random import choice
 
+from game.deductions import derive_public_deductions
 from game.rules import (
+    active_players,
     cards_that_can_disprove,
     is_correct_accusation,
     next_player_id,
@@ -22,9 +25,26 @@ from models.player import LogEntry, Player
 from telemetry import tracer
 from transport.base import AgentTransport
 
+RevealChooser = Callable[[Player, Suggestion, list[Card], int], Awaitable[Card]]
 
-def default_choose_reveal(player: Player, suggestion: Suggestion, matches: list[Card]) -> Card:
-    return matches[0]
+
+async def default_choose_reveal(
+    player: Player, suggestion: Suggestion, matches: list[Card], suggesting_player_id: int
+) -> Card:
+    """Reveals a uniformly random matching card.
+
+    The engine only ever picks when nothing better is wired in; a seat that
+    wants to choose deliberately overrides `ClueAgent._choose_reveal` and the
+    runner routes the decision there instead.
+
+    Random rather than `matches[0]`, which is what this used to be: showing
+    the first match in hand order makes every disproof a deterministic
+    function of the deal. A disprover holding two of the three named cards
+    always showed whichever landed earlier in its hand, so a suggester could
+    name the same card five turns running and learn nothing about it — which
+    is exactly what happened in the traced game.
+    """
+    return choice(matches)
 
 
 class GameEngine:
@@ -37,7 +57,7 @@ class GameEngine:
         self,
         state: GameState,
         transport: AgentTransport,
-        choose_reveal: Callable[[Player, Suggestion, list[Card]], Card] = default_choose_reveal,
+        choose_reveal: RevealChooser = default_choose_reveal,
     ) -> None:
         self.state = state
         self.transport = transport
@@ -107,7 +127,14 @@ class GameEngine:
                     unable_to_disprove.append(candidate.id)
                     continue
 
-                revealed = self.choose_reveal(candidate, suggestion, matches)
+                revealed = await self.choose_reveal(
+                    candidate, suggestion, matches, suggesting_player_id
+                )
+                if revealed not in matches:
+                    raise ValueError(
+                        f"Player {candidate.id} tried to reveal {revealed!r}, "
+                        f"which does not disprove {suggestion!r}"
+                    )
                 disproving_player_id = candidate.id
 
                 reveal_event = CardRevealEvent(
@@ -174,8 +201,15 @@ class GameEngine:
                 await self._end_game(winning_player_id=accusing_player_id)
             else:
                 self._player(accusing_player_id).active = False
-                if not any(p.active for p in self.state.players):
-                    await self._end_game(winning_player_id=None)
+                remaining = active_players(self.state.players)
+                if len(remaining) <= 1:
+                    # Last player standing wins by default: with nobody left
+                    # to out-guess them the game is decided, and letting it
+                    # run on just spends turns (and provider calls) on
+                    # suggestions no opponent is left to disprove.
+                    await self._end_game(
+                        winning_player_id=remaining[0].id if remaining else None
+                    )
 
             return event
 
@@ -209,4 +243,8 @@ class GameEngine:
             card_log=player.log,
             public_history=list(self.state.public_event_history),
             private_reveals=private_reveals,
+            public_deductions=derive_public_deductions(
+                self.state.public_event_history,
+                [p.id for p in self.state.players],
+            ),
         )

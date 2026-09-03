@@ -21,8 +21,32 @@ used to benchmark reasoning strategies and models against each other.
 
 `GameState` is ground truth and is never handed to an agent directly.
 Agents only ever see a `PlayerObservation`, derived by the engine, which
-contains their own hand, their card-knowledge log, and the public/private
-event history they're entitled to.
+contains their own hand, their card-knowledge log, the public/private
+event history they're entitled to, and `public_deductions` — the facts
+`game/deductions.py` reads straight off the public event log (who was
+asked and held none of a triple; who holds at least one of a triple;
+which triples a failed accusation has ruled out). That derivation
+deliberately stops short of playing: it never cross-references one player
+against another, never touches the observer's hand, and never narrows the
+envelope, because working out the solution is the thing these agents are
+being measured on.
+
+Within a single player it does tidy up — `simplify_groups` drops a card
+that same player is publicly proven not to hold, collapses identical
+groups, and drops a group that a narrower one already implies. That is
+bookkeeping on facts already stated rather than deduction, and it matters:
+in one traced game 62 of 122 rendered rows carried a duplicated triple,
+because two seats had suggested the same thing and the same player had
+disproved it twice.
+
+A seat makes two decisions, and both belong to the agent. `choose_action`
+is its turn. `choose_reveal` is which card it shows when someone else's
+suggestion reaches it — a real strategic choice whenever it holds more
+than one of the three named cards, since showing the same card to the
+same opponent repeatedly leaks far less than spreading reveals around.
+`ClueAgent` gives that a random default, `LLMClueAgent` asks the model,
+and the engine routes it through an injected `RevealChooser` so it stays
+ignorant of agents entirely.
 
 ### Prompt structure and caching
 
@@ -38,6 +62,34 @@ only the new bytes. A `LLMClient` backed by a provider with explicit prompt
 caching (e.g. Anthropic's `cache_control`) can place its cache boundary
 right after the last cacheable segment; a client for a provider with only
 automatic caching can ignore the flag and concatenate everything.
+
+### Response schemas
+
+Every decision is bound to a Pydantic schema through the provider's own
+structured-output mode rather than asked for in prose. Two of those schemas
+are built per call, not declared once:
+
+- **The reveal schema is generated from the cards actually on offer.**
+  `reveal_schema(offered, with_notes)` makes `card` a `Literal` over the two
+  or three cards in this hand that disprove this suggestion, which is
+  narrower than any fixed enum could express. Left as a free string, models
+  named a card they had shown that opponent before but that wasn't on offer,
+  and the resolver quietly substituted one of its own choosing — leaking a
+  *fresh* card to the one opponent the seat was trying not to inform. If a
+  provider ignores the constraint anyway, `_off_menu_reveal` still shows a
+  legal card (a random one, not `matches[0]`) rather than ending the run, and
+  records `clue.reveal_off_menu` on the span so the rate is queryable instead
+  of invisible.
+- **`notes` only exists when the seat's scratchpad is on.** A `notes` field
+  is an invitation, and a model handed one writes a paragraph of deduction
+  that a scratchpad-less seat then throws away. `turn_schema(with_notes)` and
+  the matching `with_notes` flag on the prompt builders remove both the field
+  and the sentence describing it, so the tokens are never generated.
+
+`TurnDecision` is deliberately one flat object with a `kind` selector rather
+than a discriminated union: a union serializes to a top-level `oneOf`, which
+several providers reject outright in structured-output mode. `to_action()`
+converts it back to the engine's typed action.
 
 ### LangChain-backed LLM clients
 
@@ -104,10 +156,12 @@ clue.game            (main.py, root span for the whole run)
     └── clue.suggestion   (or clue.accusation — disproving_player_id, correct, etc.)
 clue.agent.choose_action   (agents/base.py — every ClueAgent subclass, for free;
                              wraps LLMClueAgent's LLM round-trip when that's the agent)
+clue.agent.choose_reveal   (same, for the "which card do I show?" decision)
 ```
 
-Centralizing the agent span in `ClueAgent.choose_action` (subclasses
-implement `_choose_action`) means `RandomClueAgent`, `LLMClueAgent`, and any
+Centralizing the agent spans in `ClueAgent.choose_action` /
+`ClueAgent.choose_reveal` (subclasses implement the underscore-prefixed
+versions) means `RandomClueAgent`, `LLMClueAgent`, and any
 future rule-based/human agent all get consistent per-decision latency and
 outcome attributes without instrumenting themselves individually — exactly
 the kind of cross-cutting concern that shouldn't live in each strategy.
@@ -157,6 +211,30 @@ without a LangChain-backed client. Without it, `configure_langsmith_tracing()`
 raises `ImportError`; `tests/test_langsmith.py` skips itself via
 `pytest.importorskip` the same way.
 
+#### What each run is tagged with
+
+Global tracing alone gets you the prompts and the completions but not who
+produced them: an export of a four-seat game is a flat list of chat
+completions, and which model played which seat has to be reconstructed by
+reading prompt text. So every call also carries the seat's identity.
+`service/agent_factory.py::seat_identity` builds it once per seat —
+`clue_run_id`, `clue_player_id`, `clue_agent_type`, `clue_provider`,
+`clue_model`, `clue_scratchpad`, and the thinking budget and temperature
+when set — and it goes two places:
+
+- to LangSmith as run `metadata`, plus `tags` for the cheap filters
+  (`model:…`, `player_id:…`, `decision:…`) and a `run_name` like
+  `action p2 t14` so the run list isn't 200 rows all reading `ChatAnthropic`.
+  Per-call `clue_decision` (`action` or `reveal`) and `clue_turn` are merged
+  in on top by `LLMClueAgent`.
+- to OpenTelemetry as span attributes on `clue.agent.choose_action` and
+  `clue.agent.choose_reveal`, dotted (`clue.provider`, `clue.model`) to match
+  OTel convention. `clue.run_id` is the same id on both sides, which is what
+  stitches a seat's LangSmith runs back to its spans in Jaeger.
+
+Random seats get the same treatment minus the model fields, so a mixed game
+is still groupable end to end.
+
 ## Running
 
 ```bash
@@ -167,3 +245,75 @@ uv sync --extra langsmith        # + LangSmith LLM call tracing (needs --extra l
 uv run python main.py            # plays one local game with random agents
 uv run pytest                    # runs the test suite (no LLM or network required)
 ```
+
+## Operational testing (containerized)
+
+A small containerized stack lets you drive real games from a browser, with
+per-seat model selection and full trace visibility, without touching Python.
+It's for manual/exploratory testing of game play and tracing — not a
+production deployment.
+
+**Containers** (`docker-compose.yml`):
+
+| Service         | Image / build                              | Port  | Role |
+|-----------------|---------------------------------------------|-------|------|
+| `frontend`      | `docker/frontend.Dockerfile` (nginx)         | 8080  | Static test console; reverse-proxies `/api/` to `game-logic` so the browser never deals with CORS |
+| `game-logic`    | `docker/game-logic.Dockerfile` (FastAPI)     | 8000  | Wraps the existing engine/agents behind an HTTP + SSE API (`service/app.py`) |
+| `otel-collector`| `otel/opentelemetry-collector-contrib:0.110.0` | —   | Receives OTLP from `game-logic`, forwards to Jaeger |
+| `jaeger`        | `jaegertracing/all-in-one:1.57`              | 16686 | Trace storage + UI |
+
+**Run it:**
+
+```bash
+cp .env.example .env             # blank is fine for random-only agents;
+                                  # fill in provider keys to test LLM seats
+docker compose up --build
+```
+
+Then open:
+- **http://localhost:8080** — test console: pick player count, an agent
+  type (`random` or a provider) and model per seat, and a turn cap, then
+  start a game and watch events stream in live.
+- **http://localhost:16686** — Jaeger UI. Each game run is tagged with a
+  `clue.run_id` span attribute; the console's game screen includes a
+  "View trace" link that deep-links straight to that run's spans
+  (`clue.game` → `clue.turn` → `clue.suggestion`/`clue.accusation`, plus
+  `clue.agent.choose_action` for LLM seats).
+
+**API surface** (`service/app.py`), if you want to drive it directly instead
+of through the console:
+
+- `GET /providers` — which LLM providers are available (i.e. have their API
+  key env var set) vs. usable only as `random`.
+- `POST /games` — `{n_players, seats: [...], max_turns}` →
+  `{game_id, run_id, stream_url}`. A seat is
+  `{agent_type, provider?, model?, temperature?, max_tokens?, thinking_budget?, scratchpad?}`;
+  `agent_type` is `"random"` or `"llm"` (llm seats require `provider` +
+  `model`). The generation knobs are provider-neutral — `agent_factory`
+  translates them into each SDK's own parameter names, and anything left
+  unset stays at the provider default. Two are worth setting deliberately:
+  - `thinking_budget` caps reasoning tokens per decision (`0` disables
+    extended thinking where the provider allows it). Unset, a reasoning
+    model will happily spend thousands of tokens choosing between three
+    move shapes.
+  - `scratchpad` (default `false`) lets that seat write itself private
+    notes and read them back on its next decision. It's per-seat because
+    whether a model plays better carrying its own notes forward is a
+    variable worth measuring, not a default.
+- `GET /games/{game_id}` — snapshot: status, turn number, current player,
+  winner (if any).
+- `GET /games/{game_id}/events` — Server-Sent Events stream of the game as
+  it plays out (`game_started`, `turn_taken`, `public_event`,
+  `private_reveal`, `error`, `game_finished` envelopes); replays backlog on
+  (re)connect and closes after `game_finished`. Frames are unnamed — every
+  one carries its `kind` in the payload and clients dispatch on that, so
+  `EventSource.onmessage` receives the whole feed (see
+  `service/app.py::_format_sse` for why naming them is a trap). Because the
+  backlog is replayed in full on reconnect, a client should rebuild its view
+  from the stream rather than append to what it already has.
+
+**Notes:**
+- `game-logic` only has the providers you've given keys for in `.env`
+  actually usable; everything else still runs fine with `random` seats.
+- `docker compose down` tears the stack down; add `-v` to also drop the
+  (currently unused) volumes.
