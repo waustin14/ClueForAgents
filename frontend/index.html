@@ -43,6 +43,7 @@
             Turn <span id="turn-number">0</span> ·
             Current player <span id="current-player">–</span>
           </p>
+          <p id="waiting-on-line" hidden>Waiting on <span id="waiting-on"></span></p>
         </div>
         <div class="header-actions">
           <a id="jaeger-link" href="#" target="_blank" rel="noopener">View trace in Jaeger →</a>
@@ -50,12 +51,17 @@
         </div>
       </div>
 
-      <div class="card">
+      <div class="card" id="player-panels-card" hidden>
+        <h3>Your seats</h3>
+        <div id="player-panels"></div>
+      </div>
+
+      <div class="card" id="seats-card">
         <h3>Seats</h3>
         <div id="seat-cards"></div>
       </div>
 
-      <div class="card">
+      <div class="card" id="feed-card">
         <div class="feed-header">
           <h3>Event feed</h3>
           <label class="toggle">

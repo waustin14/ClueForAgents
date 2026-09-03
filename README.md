@@ -16,8 +16,13 @@ used to benchmark reasoning strategies and models against each other.
   running everything in-process. Other transports (A2A, websockets, a
   human UI) can implement the same protocol without touching the engine.
 - `agents/` — controllers that decide what to do given a
-  `PlayerObservation`: `RandomClueAgent` (no LLM, used for testing) and
-  `LLMClueAgent` (delegates to a pluggable `LLMClient`).
+  `PlayerObservation`: `RandomClueAgent` (no LLM, used for testing),
+  `LLMClueAgent` (delegates to a pluggable `LLMClient`), and
+  `HumanClueAgent` (parks on a decision until a person answers it over
+  HTTP — see "Human seats" below). `agents/` never imports a transport, so
+  `HumanClueAgent` knows it has an async `on_request` callback to call when
+  a decision is pending, not what that callback does with it (in
+  `service/game_runner.py`, it publishes an SSE envelope).
 
 `GameState` is ground truth and is never handed to an agent directly.
 Agents only ever see a `PlayerObservation`, derived by the engine, which
@@ -272,8 +277,11 @@ docker compose up --build
 
 Then open:
 - **http://localhost:8080** — test console: pick player count, an agent
-  type (`random` or a provider) and model per seat, and a turn cap, then
-  start a game and watch events stream in live.
+  type (`random`, `human`, or a provider) and model per seat, and a turn
+  cap, then start a game and watch events stream in live. A human seat's
+  panel (and its shareable join link, for hot-seat testing across
+  browsers) appears on the game screen; see the `POST /games` and
+  `/players/{player_id}` entries below for the endpoints it drives.
 - **http://localhost:16686** — Jaeger UI. Each game run is tagged with a
   `clue.run_id` span attribute; the console's game screen includes a
   "View trace" link that deep-links straight to that run's spans
@@ -284,33 +292,85 @@ Then open:
 of through the console:
 
 - `GET /providers` — which LLM providers are available (i.e. have their API
-  key env var set) vs. usable only as `random`.
+  key env var set) vs. usable regardless (`random`, `human`).
+- `GET /cards` — every legal card value (`{people, weapons, rooms}`), so a
+  client never has to hardcode the enum the engine itself uses. Used to
+  populate a human seat's suggestion/accusation form.
 - `POST /games` — `{n_players, seats: [...], max_turns}` →
-  `{game_id, run_id, stream_url}`. A seat is
-  `{agent_type, provider?, model?, temperature?, max_tokens?, thinking_budget?, scratchpad?}`;
-  `agent_type` is `"random"` or `"llm"` (llm seats require `provider` +
-  `model`). The generation knobs are provider-neutral — `agent_factory`
-  translates them into each SDK's own parameter names, and anything left
-  unset stays at the provider default. Two are worth setting deliberately:
+  `{game_id, run_id, stream_url, human_seats: [...]}`. A seat is
+  `{agent_type, provider?, model?, temperature?, max_tokens?, thinking_budget?, scratchpad?, name?, decision_timeout?}`;
+  `agent_type` is `"random"`, `"llm"`, or `"human"` (llm seats require
+  `provider` + `model`). The generation knobs are provider-neutral —
+  `agent_factory` translates them into each SDK's own parameter names, and
+  anything left unset stays at the provider default. Two are worth setting
+  deliberately:
   - `thinking_budget` caps reasoning tokens per decision (`0` disables
     extended thinking where the provider allows it). Unset, a reasoning
     model will happily spend thousands of tokens choosing between three
-    move shapes.
+    move shapes. The number is only sent literally to providers that take
+    one: OpenAI's reasoning models and Claude 4.6+ (Sonnet 5, Opus 5, the
+    4.6–4.8 family) take an effort level instead, so `agent_factory` maps
+    the budget onto one (`<2048` low, `<8192` medium, `<32768` high, else
+    xhigh) and, for Claude, switches to `thinking.type=adaptive` — the
+    older `enabled` + `budget_tokens` form is a 400 on those models. Fable
+    and Mythos can't turn thinking off at all, so `0` becomes `low` effort
+    there. Pre-4.6 Claude models still get the literal budget.
   - `scratchpad` (default `false`) lets that seat write itself private
     notes and read them back on its next decision. It's per-seat because
     whether a model plays better carrying its own notes forward is a
     variable worth measuring, not a default.
+
+  A `"human"` seat ignores every LLM knob (setting `provider`, `model`,
+  `thinking_budget`, or `scratchpad` on one is a 422) and instead takes
+  `name` (shown on its seat card and join link) and an optional
+  `decision_timeout` in seconds (a person's answer window before the seat
+  auto-passes or auto-reveals; unset waits forever, which is what the test
+  console defaults to). `POST /games` mints one bearer token per human
+  seat and returns it in `human_seats` as
+  `{player_id, name, token, join_url}` — `join_url` is a
+  `/?game=<id>&player=<pid>&token=<t>` link that takes whoever opens it
+  straight to that seat's panel, no separate login step. These tokens are
+  a test-console convenience, not a real auth boundary — see
+  `docs/plans/human-players.md` §3.
 - `GET /games/{game_id}` — snapshot: status, turn number, current player,
-  winner (if any).
+  winner (if any), and `waiting_on: {player_id, kind}` whenever the run is
+  genuinely parked waiting on a human seat's decision (`null` otherwise).
+- `GET /games/{game_id}/players/{player_id}` (requires an
+  `X-Player-Token` header matching that seat's minted token — 403 if
+  missing/wrong, 404 if the seat isn't human) — that seat's own
+  `PlayerObservation` (hand, card-knowledge log, event history it's
+  entitled to, public deductions) plus whatever decision is currently
+  pending for it, if any.
+- `POST /games/{game_id}/players/{player_id}/action` (same token
+  requirement) — submits a `PlayerAction` (suggestion / accusation /
+  pass) for a pending `"action"` decision. 409 if nothing (or the wrong
+  kind) is pending for that seat.
+- `POST /games/{game_id}/players/{player_id}/reveal` (same token
+  requirement) — submits `{card}` for a pending `"reveal"` decision. 400
+  if `card` isn't one of the offered cards, leaving the decision pending
+  so the person can try again; 409 if nothing is pending.
 - `GET /games/{game_id}/events` — Server-Sent Events stream of the game as
   it plays out (`game_started`, `turn_taken`, `public_event`,
-  `private_reveal`, `error`, `game_finished` envelopes); replays backlog on
-  (re)connect and closes after `game_finished`. Frames are unnamed — every
-  one carries its `kind` in the payload and clients dispatch on that, so
-  `EventSource.onmessage` receives the whole feed (see
-  `service/app.py::_format_sse` for why naming them is a trap). Because the
-  backlog is replayed in full on reconnect, a client should rebuild its view
-  from the stream rather than append to what it already has.
+  `private_reveal`, `decision_requested`, `decision_resolved`, `error`,
+  `game_finished` envelopes); replays backlog on (re)connect and closes
+  after `game_finished`. Frames are unnamed — every one carries its `kind`
+  in the payload and clients dispatch on that, so `EventSource.onmessage`
+  receives the whole feed (see `service/app.py::_format_sse` for why
+  naming them is a trap). Because the backlog is replayed in full on
+  reconnect, a client should rebuild its view from the stream rather than
+  append to what it already has.
+
+  This feed is the *spectator* view, shared by everyone watching the game
+  — including any human seated at the table. An all-AI game keeps card
+  identities on `private_reveal` as a debugging aid, but the moment any
+  seat is human that becomes a cheat sheet readable by unticking "show
+  private reveals" in the console: the same envelope reaches every
+  connection. So `SSEBroadcastTransport` strips the `card` field from
+  `private_reveal` whenever the game has a human seat, keeping only
+  `revealing_player_id`/`receiving_player_id`; a human seat still sees its
+  own reveals in full through `GET /games/{game_id}/players/{player_id}`,
+  which reads from that seat's own `PlayerObservation` rather than this
+  feed.
 
 **Notes:**
 - `game-logic` only has the providers you've given keys for in `.env`

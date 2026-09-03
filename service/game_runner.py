@@ -10,9 +10,11 @@ an `error` envelope rather than crashing the whole service.
 """
 
 import asyncio
+import secrets
 from uuid import uuid4
 
 from agents.base import ClueAgent
+from agents.human import PendingDecision
 from game.engine import GameEngine, RevealChooser
 from game.setup import MAX_PLAYERS, MIN_PLAYERS, initialize_game
 from models.card import Card
@@ -20,13 +22,42 @@ from models.events import Suggestion
 from models.game_state import GameStatus
 from models.player import Player
 from service import registry
-from service.agent_factory import build_agent
+from service.agent_factory import OnDecisionRequest, build_agent
 from service.registry import RunRecord
 from service.schemas import CreateGameRequest
 from telemetry import tracer
 from transport.sse import SSEBroadcastTransport
 
 MAX_TURNS_CEILING = 2000
+
+
+def _make_on_decision_request(transport: SSEBroadcastTransport) -> OnDecisionRequest:
+    """Publishes `decision_requested` the instant a human seat's agent parks
+    on a decision, so spectators — and the seat's own panel — learn about it
+    without polling `GET /games/{id}/players/{pid}`.
+
+    Kept here rather than in `agents/human.py` so that module never has to
+    import a transport; `HumanClueAgent` only knows it has an async callback
+    to call, not what that callback does with the information.
+    """
+
+    async def on_decision_request(decision: PendingDecision) -> None:
+        await transport.publish(
+            "decision_requested",
+            {
+                "player_id": decision.player_id,
+                # Named `decision_kind` rather than `kind` because
+                # `publish()` builds the envelope as `{"kind": kind, **data}`
+                # — a `"kind"` key here would silently clobber the envelope's
+                # own discriminator ("decision_requested") with "action" or
+                # "reveal", making the envelope indistinguishable from any
+                # other kind on the wire.
+                "decision_kind": decision.kind,
+                "turn": decision.turn_number,
+            },
+        )
+
+    return on_decision_request
 
 
 def agent_reveal_chooser(engine: GameEngine, agents: dict[int, ClueAgent]) -> RevealChooser:
@@ -69,16 +100,30 @@ def start_game(request: CreateGameRequest) -> RunRecord:
         raise ValueError(f"max_turns must be between 1 and {MAX_TURNS_CEILING}")
 
     state = initialize_game(request.n_players)
-    transport = SSEBroadcastTransport()
+    # An all-AI game keeps card identities on the spectator feed as a
+    # debugging aid; the moment any seat is human that same feed would be a
+    # cheat sheet readable by unticking "show reveals" in the console, so
+    # the transport strips it (see SSEBroadcastTransport.publish_private_cards).
+    has_human_seat = any(seat.agent_type == "human" for seat in request.seats)
+    transport = SSEBroadcastTransport(publish_private_cards=not has_human_seat)
     engine = GameEngine(state, transport)
     # Minted before the agents so each one can be built already knowing which
     # run it belongs to — that id is what stitches a seat's LangSmith runs and
     # its OTel spans back together into one game.
     game_id = uuid4().hex
-    agents = {
-        player.id: build_agent(player.id, seat, run_id=game_id)
-        for player, seat in zip(state.players, request.seats, strict=True)
-    }
+    on_decision_request = _make_on_decision_request(transport)
+
+    player_tokens: dict[int, str] = {}
+    agents: dict[int, ClueAgent] = {}
+    for player, seat in zip(state.players, request.seats, strict=True):
+        # `Player.name` already exists for display purposes but nothing set
+        # it before; a human seat's display name is the first real use.
+        player.name = seat.name
+        if seat.agent_type == "human":
+            player_tokens[player.id] = secrets.token_urlsafe(16)
+        agents[player.id] = build_agent(
+            player.id, seat, run_id=game_id, on_decision_request=on_decision_request
+        )
     engine.choose_reveal = agent_reveal_chooser(engine, agents)
 
     record = RunRecord(
@@ -90,6 +135,7 @@ def start_game(request: CreateGameRequest) -> RunRecord:
         agents=agents,
         seats=request.seats,
         max_turns=request.max_turns,
+        player_tokens=player_tokens,
     )
     registry.add(record)
     record.task = asyncio.create_task(_play(record))

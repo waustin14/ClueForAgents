@@ -1,7 +1,8 @@
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from agents.base import ClueAgent
+from agents.human import HumanClueAgent
 from game.engine import GameEngine
 from models.game_state import GameState
 from service.schemas import SeatConfig
@@ -28,6 +29,22 @@ class RunRecord:
     max_turns: int
     status: str = "running"
     task: asyncio.Task[None] | None = None
+    # player_id -> bearer token, minted only for human seats. Player
+    # endpoints check a request's `X-Player-Token` against this map rather
+    # than any real auth — see docs/plans/human-players.md §3 for why that's
+    # an acceptable boundary here (a test console, not a deployment).
+    player_tokens: dict[int, str] = field(default_factory=dict)
+
+    @property
+    def human_player_ids(self) -> set[int]:
+        """Derived from the live agents rather than `seats`, so it always
+        reflects what's actually driving each seat.
+        """
+        return {
+            player_id
+            for player_id, agent in self.agents.items()
+            if isinstance(agent, HumanClueAgent)
+        }
 
 
 _RUNS: dict[str, RunRecord] = {}

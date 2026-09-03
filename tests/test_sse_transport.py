@@ -68,6 +68,39 @@ def test_subscriber_receives_events_published_after_subscribing():
     assert envelope == {"kind": "turn_taken", "turn": 1}
 
 
+def test_publish_private_cards_false_strips_the_card_but_keeps_the_player_ids():
+    transport = SSEBroadcastTransport(publish_private_cards=False)
+    reveal = CardRevealEvent(
+        turn=1,
+        revealing_player_id=1,
+        receiving_player_id=0,
+        card=PersonCard(value=PersonValue.PLUM),
+    )
+
+    run(transport.send(0, reveal))
+
+    # send_log keeps the authoritative full event regardless of the flag.
+    assert transport.send_log[0] == [reveal]
+    published = transport._history[0]["event"]
+    assert "card" not in published
+    assert published["revealing_player_id"] == 1
+    assert published["receiving_player_id"] == 0
+
+
+def test_publish_private_cards_defaults_true_and_includes_the_card():
+    transport = SSEBroadcastTransport()
+    reveal = CardRevealEvent(
+        turn=1,
+        revealing_player_id=1,
+        receiving_player_id=0,
+        card=PersonCard(value=PersonValue.PLUM),
+    )
+
+    run(transport.send(0, reveal))
+
+    assert transport._history[0]["event"]["card"] == {"type": "person", "value": "Professor Plum"}
+
+
 def test_multiple_subscribers_each_get_their_own_queue():
     transport = SSEBroadcastTransport()
     _backlog1, queue1 = transport.subscribe_with_backlog()

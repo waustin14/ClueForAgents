@@ -29,11 +29,17 @@ from transport.local import LocalTransport  # noqa: E402
 # The global TracerProvider can only be installed once per process (the
 # OTel API deliberately no-ops a second `set_tracer_provider` call), so this
 # module wires it up once here rather than per test, and each test clears
-# the shared in-memory exporter instead of reinstalling the provider.
+# the shared in-memory exporter instead of reinstalling the provider. If
+# another test module (e.g. tests/test_human_agent.py) already installed a
+# real SDK provider first — collection order isn't guaranteed — this reuses
+# it and just adds its own processor, rather than building an orphan
+# TracerProvider that never actually becomes the global one.
 _EXPORTER = InMemorySpanExporter()
-_provider = TracerProvider()
+_provider = trace.get_tracer_provider()
+if not isinstance(_provider, TracerProvider):
+    _provider = TracerProvider()
+    trace.set_tracer_provider(_provider)
 _provider.add_span_processor(SimpleSpanProcessor(_EXPORTER))
-trace.set_tracer_provider(_provider)
 
 
 @pytest.fixture(autouse=True)
